@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, createContext, useContext } from "react";
 import { BrowserRouter, Routes, Route, Link, NavLink, useNavigate, useParams, useLocation } from "react-router-dom";
+import { supabase } from "./lib/supabase.js";
 import { ArrowRight, Bike, Search, ShoppingBag, Heart, Menu, X, ChevronDown, SlidersHorizontal, ShieldCheck, Truck, Wrench, MapPin, Phone, Mail, UserRound, Package, LayoutDashboard, Boxes, Users, Tags, ChartNoAxesCombined, Settings, Plus, Minus, Trash2, Check, Clock3, ClipboardList, Upload, LogOut, ExternalLink, ArrowUpRight, Filter, CreditCard, MapPinned, CircleHelp, Star, Eye, Pencil, Bell, Wallet, RefreshCw, LockKeyhole } from "lucide-react";
 
 const initialProducts = [
@@ -13,25 +14,37 @@ const initialProducts = [
 const money=n=>new Intl.NumberFormat("en-IN",{style:"currency",currency:"INR",maximumFractionDigits:0}).format(Number(n)||0);
 const Store=createContext(null);
 const read=(key,fallback)=>{try{return JSON.parse(localStorage.getItem(key))??fallback}catch{return fallback}};
+const fromDbProduct=row=>({id:row.id,name:row.name,brand:row.brand||"",category:row.category||"Other",price:Number(row.price)||0,mrp:Number(row.mrp??row.original_price??row.price)||0,size:row.size||"",badge:(row.tags||[])[0]||"",stock:Number(row.stock)||0,color:(row.colors||"").split(",")[0]||"",image:row.image_url||"",description:row.description||"",specs:Array.isArray(row.specifications)?row.specifications:[],sku:row.sku||"",purchasePrice:Number(row.purchase_price)||0,gallery:Array.isArray(row.gallery)?row.gallery:[]});
+const toDbProduct=p=>({id:typeof p.id==="string"&&p.id.includes("-")?p.id:undefined,name:p.name,brand:p.brand||"",category:p.category||"Other",size:p.size||"",price:Number(p.price)||0,original_price:Number(p.mrp??p.price)||0,mrp:Number(p.mrp??p.price)||0,purchase_price:Number(p.purchasePrice)||0,description:p.description||"",image_url:p.image||"",stock:Math.max(0,Number(p.stock)||0),is_active:p.isActive!==false,colors:p.color||"",specifications:p.specs||[],gallery:p.gallery||[],sku:p.sku||null,tags:p.badge?[p.badge]:[]});
+const fromDbOrder=o=>({id:o.order_number,date:o.created_at,name:o.customer_name,phone:o.customer_phone,email:o.customer_email,total:Number(o.total)||0,status:({pending:"Order received",confirmed:"Confirmed",packed:"Processing",shipped:"Out for delivery",delivered:"Delivered",cancelled:"Cancelled"})[o.order_status]||o.order_status,payment:o.payment_status,items:(o.order_items||[]).map(i=>({id:i.product_id,name:i.product_name,qty:i.quantity,price:Number(i.unit_price)||0}))});
 function StoreProvider({children}){
- const [products,setProducts]=useState(()=>read("ch-products",initialProducts));
+ const [products,setProductState]=useState(()=>read("ch-products",[]));
  const [cart,setCart]=useState(()=>read("ch-cart",[]));
  const [wishlist,setWishlist]=useState(()=>read("ch-wishlist",[]));
- const [orders,setOrders]=useState(()=>read("ch-orders",[]));
- const [customers,setCustomers]=useState(()=>read("ch-customers",[]));
+ const [orders,setOrderState]=useState(()=>read("ch-orders",[]));
+ const [customers,setCustomers]=useState([]);
  const [toast,setToast]=useState("");
- useEffect(()=>localStorage.setItem("ch-products",JSON.stringify(products)),[products]);
- useEffect(()=>localStorage.setItem("ch-cart",JSON.stringify(cart)),[cart]);
- useEffect(()=>localStorage.setItem("ch-wishlist",JSON.stringify(wishlist)),[wishlist]);
- useEffect(()=>localStorage.setItem("ch-orders",JSON.stringify(orders)),[orders]);
- useEffect(()=>localStorage.setItem("ch-customers",JSON.stringify(customers)),[customers]);
- const notify=message=>{setToast(message);window.clearTimeout(window.__chToast);window.__chToast=window.setTimeout(()=>setToast(""),2400)};
- const add=(p)=>{setCart(old=>{const found=old.find(x=>x.id===p.id);return found?old.map(x=>x.id===p.id?{...x,qty:x.qty+1}:x):[...old,{...p,qty:1}]});notify("Added to your bag")};
- const qty=(id,delta)=>setCart(old=>old.map(x=>x.id===id?{...x,qty:Math.max(1,x.qty+delta)}:x));
+ const [session,setSession]=useState(null);
+ const [authLoading,setAuthLoading]=useState(true);
+ const [loadingProducts,setLoadingProducts]=useState(true);
+ const isAdmin=session?.user?.app_metadata?.role==="admin";
+ useEffect(()=>{let mounted=true;supabase.auth.getSession().then(({data})=>{if(mounted){setSession(data.session);setAuthLoading(false)}});const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,next)=>{setSession(next);setAuthLoading(false)});return()=>{mounted=false;subscription.unsubscribe()}},[]);
+ useEffect(()=>{localStorage.setItem("ch-cart",JSON.stringify(cart))},[cart]);
+ useEffect(()=>{localStorage.setItem("ch-wishlist",JSON.stringify(wishlist))},[wishlist]);
+ const notify=message=>{setToast(message);window.clearTimeout(window.__chToast);window.__chToast=window.setTimeout(()=>setToast(""),2600)};
+ const refreshProducts=async()=>{setLoadingProducts(true);const query=supabase.from("products").select("*").order("created_at",{ascending:false});const {data,error}=isAdmin?await query:await query.eq("is_active",true);if(error){notify("Could not load bicycles: "+error.message)}else setProductState((data||[]).map(fromDbProduct));setLoadingProducts(false)};
+ const refreshOrders=async()=>{if(!isAdmin)return;const {data,error}=await supabase.from("orders").select("*,order_items(*)").order("created_at",{ascending:false});if(error){notify("Could not load orders: "+error.message);return}const mapped=(data||[]).map(fromDbOrder);setOrderState(mapped);localStorage.setItem("ch-orders",JSON.stringify(mapped));const unique=new Map();(data||[]).forEach(o=>{if(!unique.has(o.customer_phone))unique.set(o.customer_phone,{name:o.customer_name,phone:o.customer_phone,email:o.customer_email||""})});setCustomers([...unique.values()])};
+ useEffect(()=>{refreshProducts()},[isAdmin]);
+ useEffect(()=>{if(isAdmin)refreshOrders();else{setOrderState(read("ch-orders",[]));setCustomers([])}},[isAdmin]);
+ const setProducts=updater=>{setProductState(current=>{const next=typeof updater==="function"?updater(current):updater;const oldIds=new Set(current.map(p=>String(p.id)));const newIds=new Set(next.map(p=>String(p.id)));(async()=>{for(const p of current){if(!newIds.has(String(p.id))&&String(p.id).includes("-")){const {error}=await supabase.from("products").delete().eq("id",p.id);if(error)notify(error.message)}}for(const p of next){const payload=toDbProduct(p);let result;if(String(p.id).includes("-")&&oldIds.has(String(p.id)))result=await supabase.from("products").update(payload).eq("id",p.id);else{delete payload.id;result=await supabase.from("products").insert(payload)}if(result?.error)notify("Product save failed: "+result.error.message)}await refreshProducts()})();return next})};
+ const setOrders=updater=>{setOrderState(current=>{const next=typeof updater==="function"?updater(current):updater;(async()=>{for(const o of next){const prior=current.find(x=>x.id===o.id);if(prior&&prior.status!==o.status){const map={"Order received":"pending","Confirmed":"confirmed","Processing":"packed","Ready for dispatch":"packed","Out for delivery":"shipped","Delivered":"delivered","Cancelled":"cancelled"};const {error}=await supabase.from("orders").update({order_status:map[o.status]||"pending",...(o.status==="Delivered"?{delivered_at:new Date().toISOString()}:{}),...(o.status==="Cancelled"?{cancelled_at:new Date().toISOString()}:{})}).eq("order_number",o.id);if(error)notify("Order update failed: "+error.message)}}await refreshOrders()})();return next})};
+ const add=p=>{if(Number(p.stock)<=0){notify("This bicycle is currently out of stock");return}setCart(old=>{const found=old.find(x=>x.id===p.id);const currentQty=found?.qty||0;if(currentQty>=Math.min(Number(p.stock)||1,10)){notify("Available stock limit reached");return old}return found?old.map(x=>x.id===p.id?{...x,qty:x.qty+1}:x):[...old,{...p,qty:1}]});notify("Added to your bag")};
+ const qty=(id,delta)=>setCart(old=>old.map(x=>x.id===id?{...x,qty:Math.max(1,Math.min(Math.min(Number(x.stock)||10,10),x.qty+delta))}:x));
  const remove=id=>setCart(old=>old.filter(x=>x.id!==id));
  const toggleWish=p=>{setWishlist(old=>old.some(x=>x.id===p.id)?old.filter(x=>x.id!==p.id):[...old,p]);notify(wishlist.some(x=>x.id===p.id)?"Removed from wishlist":"Saved to wishlist")};
- const placeOrder=data=>{const order={id:"CH"+Date.now().toString().slice(-8),date:new Date().toISOString(),status:"Order received",payment:"Pay on delivery",...data,items:cart};setOrders(old=>[order,...old]);setCustomers(old=>old.some(c=>c.phone===data.phone)?old: [{name:data.name,phone:data.phone,email:data.email},...old]);setCart([]);return order};
- return <Store.Provider value={{products,setProducts,cart,setCart,wishlist,toggleWish,orders,setOrders,customers,add,qty,remove,placeOrder,notify,toast}}>{children}</Store.Provider>;
+ const placeOrder=async data=>{const key=globalThis.crypto?.randomUUID?.()||("ch-"+Date.now()+"-"+Math.random().toString(36).slice(2));const {data:result,error}=await supabase.rpc("place_store_order",{p_name:data.name,p_phone:data.phone,p_email:data.email||"",p_address:data.address,p_city:data.city,p_pincode:data.pincode,p_notes:data.notes||"",p_items:cart.map(p=>({product_id:p.id,quantity:p.qty})),p_idempotency_key:key});if(error)throw error;const order={id:result.order_number,date:new Date().toISOString(),status:"Order received",payment:"pending",...data,total:cart.reduce((sum,p)=>sum+p.price*p.qty,0),items:cart};setOrderState(old=>[order,...old]);localStorage.setItem("ch-orders",JSON.stringify([order,...orders]));setCustomers(old=>old.some(c=>c.phone===data.phone)?old:[{name:data.name,phone:data.phone,email:data.email},...old]);setCart([]);return order};
+ const trackOrder=async(orderNumber,phone)=>{const {data,error}=await supabase.rpc("track_store_order",{p_order_number:orderNumber,p_phone:phone});if(error)throw error;return data};
+ return <Store.Provider value={{products,setProducts,cart,setCart,wishlist,toggleWish,orders,setOrders,customers,add,qty,remove,placeOrder,trackOrder,notify,toast,session,isAdmin,authLoading,loadingProducts,refreshProducts,refreshOrders}}>{children}</Store.Provider>;
 }
 const useStore=()=>useContext(Store);
 function Header(){const {cart,wishlist}=useStore();const [open,setOpen]=useState(false);return <><div className="topline">FREE BASIC SAFETY CHECK WITH EVERY BICYCLE <span>•</span> VISIT OUR STORE</div><header className="site-header"><Link to="/" className="logo"><span className="logo-icon"><Bike/></span><span>CYCLE<span className="logo-blue">HUB</span><small>RIDE YOUR WAY</small></span></Link><nav className={open?"main-nav nav-visible":"main-nav"}><NavLink to="/shop" onClick={()=>setOpen(false)}>Bicycles</NavLink><NavLink to="/services" onClick={()=>setOpen(false)}>Services</NavLink><NavLink to="/about" onClick={()=>setOpen(false)}>Our Story</NavLink><NavLink to="/contact" onClick={()=>setOpen(false)}>Contact</NavLink></nav><div className="head-actions"><Link className="head-icon" to="/wishlist" aria-label="Wishlist"><Heart/><i>{wishlist.length}</i></Link><Link className="head-icon bag-link" to="/cart" aria-label="Shopping bag"><ShoppingBag/><i>{cart.reduce((n,x)=>n+x.qty,0)}</i></Link><Link className="account-link" to="/account"><UserRound size={17}/><span>Account</span></Link><button className="mobile-toggle" onClick={()=>setOpen(!open)} aria-label="Menu">{open?<X/>:<Menu/>}</button></div></header></>}
